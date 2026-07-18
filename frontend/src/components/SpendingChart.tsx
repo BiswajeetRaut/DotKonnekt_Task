@@ -18,11 +18,16 @@ export function SpendingChart({ expenses }: { expenses: Expense[] }) {
   return (
     <div className="card">
       <h2>Spending by category</h2>
-      <div style={{ width: "100%", height: 280 }}>
+      <div style={{ width: "100%", height: 320 }}>
         <ResponsiveContainer>
-          <BarChart data={data}>
+          <BarChart data={data} margin={{ bottom: 40 }}>
             <CartesianGrid strokeDasharray="3 3" />
-            <XAxis dataKey="category" />
+            {/* interval={0} forces every category to get a label — Recharts'
+                default silently drops labels it thinks would overlap, which
+                with 5+ categories in this card's width means some bars end
+                up unlabeled (confirmed while testing with 6 categories).
+                Angling the text is what actually gives them room to fit. */}
+            <XAxis dataKey="category" interval={0} angle={-35} textAnchor="end" height={60} tick={{ fontSize: 12 }} />
             <YAxis />
             <Tooltip formatter={(value: number) => `$${value.toFixed(2)}`} />
             <Bar dataKey="total" fill="#4f46e5" radius={[4, 4, 0, 0]} />
