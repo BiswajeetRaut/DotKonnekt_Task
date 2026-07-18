@@ -1,19 +1,24 @@
-import { FormEvent, useState } from "react";
-import { ExpenseInput } from "../api";
-
-const CATEGORIES = ["food", "transport", "software", "entertainment", "other"];
+import { FormEvent, useEffect, useState } from "react";
+import { Category, ExpenseInput } from "../api";
 
 interface Props {
+  categories: Category[];
   onCreate: (input: ExpenseInput) => Promise<void>;
 }
 
-export function ExpenseForm({ onCreate }: Props) {
+export function ExpenseForm({ categories, onCreate }: Props) {
   const [amount, setAmount] = useState("");
-  const [category, setCategory] = useState(CATEGORIES[0]);
+  const [categoryId, setCategoryId] = useState<number | "">("");
   const [description, setDescription] = useState("");
   const [occurredAt, setOccurredAt] = useState(() => new Date().toISOString().slice(0, 16));
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (categoryId === "" && categories.length > 0) {
+      setCategoryId(categories[0].id);
+    }
+  }, [categories, categoryId]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -23,11 +28,15 @@ export function ExpenseForm({ onCreate }: Props) {
       setError("Amount must be a positive number");
       return;
     }
+    if (categoryId === "") {
+      setError("Add a category first");
+      return;
+    }
     setSubmitting(true);
     try {
       await onCreate({
         amount: parsedAmount,
-        category,
+        category_id: categoryId,
         description: description || null,
         occurred_at: new Date(occurredAt).toISOString(),
       });
@@ -38,6 +47,15 @@ export function ExpenseForm({ onCreate }: Props) {
     } finally {
       setSubmitting(false);
     }
+  }
+
+  if (categories.length === 0) {
+    return (
+      <div className="card">
+        <h2>Log an expense</h2>
+        <p>Add a category first (see "Categories" below) before logging an expense.</p>
+      </div>
+    );
   }
 
   return (
@@ -57,10 +75,10 @@ export function ExpenseForm({ onCreate }: Props) {
         </label>
         <label>
           Category
-          <select value={category} onChange={(e) => setCategory(e.target.value)}>
-            {CATEGORIES.map((c) => (
-              <option key={c} value={c}>
-                {c}
+          <select value={categoryId} onChange={(e) => setCategoryId(Number(e.target.value))}>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name}
               </option>
             ))}
           </select>

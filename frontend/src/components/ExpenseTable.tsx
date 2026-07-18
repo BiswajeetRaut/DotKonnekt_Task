@@ -1,18 +1,19 @@
 import { useState } from "react";
-import { ConflictError, Expense, ExpenseInput } from "../api";
+import { Category, ConflictError, Expense, ExpenseInput } from "../api";
 
 interface Props {
   expenses: Expense[];
+  categories: Category[];
   onUpdate: (id: number, input: ExpenseInput & { version: number }) => Promise<void>;
   onDelete: (id: number) => Promise<void>;
   onConflict: () => void;
 }
 
-export function ExpenseTable({ expenses, onUpdate, onDelete, onConflict }: Props) {
+export function ExpenseTable({ expenses, categories, onUpdate, onDelete, onConflict }: Props) {
   const [editingId, setEditingId] = useState<number | null>(null);
-  const [draft, setDraft] = useState<{ amount: string; category: string; description: string }>({
+  const [draft, setDraft] = useState<{ amount: string; categoryId: number; description: string }>({
     amount: "",
-    category: "",
+    categoryId: 0,
     description: "",
   });
   const [rowError, setRowError] = useState<string | null>(null);
@@ -21,7 +22,7 @@ export function ExpenseTable({ expenses, onUpdate, onDelete, onConflict }: Props
     setEditingId(expense.id);
     setDraft({
       amount: expense.amount,
-      category: expense.category,
+      categoryId: expense.category.id,
       description: expense.description || "",
     });
     setRowError(null);
@@ -32,7 +33,7 @@ export function ExpenseTable({ expenses, onUpdate, onDelete, onConflict }: Props
     try {
       await onUpdate(expense.id, {
         amount: Number(draft.amount),
-        category: draft.category,
+        category_id: draft.categoryId,
         description: draft.description || null,
         occurred_at: expense.occurred_at,
         version: expense.version,
@@ -68,10 +69,17 @@ export function ExpenseTable({ expenses, onUpdate, onDelete, onConflict }: Props
                 <>
                   <td>{new Date(expense.occurred_at).toLocaleString()}</td>
                   <td>
-                    <input
-                      value={draft.category}
-                      onChange={(e) => setDraft({ ...draft, category: e.target.value })}
-                    />
+                    <select
+                      aria-label="Category"
+                      value={draft.categoryId}
+                      onChange={(e) => setDraft({ ...draft, categoryId: Number(e.target.value) })}
+                    >
+                      {categories.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.name}
+                        </option>
+                      ))}
+                    </select>
                   </td>
                   <td>
                     <input
@@ -95,7 +103,7 @@ export function ExpenseTable({ expenses, onUpdate, onDelete, onConflict }: Props
               ) : (
                 <>
                   <td>{new Date(expense.occurred_at).toLocaleString()}</td>
-                  <td>{expense.category}</td>
+                  <td>{expense.category.name}</td>
                   <td>${Number(expense.amount).toFixed(2)}</td>
                   <td>{expense.description}</td>
                   <td className="row-actions">

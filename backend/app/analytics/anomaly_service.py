@@ -6,10 +6,13 @@ can be unit tested or lifted into a separate worker process without touching the
 CRUD API. It is wired to the CRUD layer only via `app/events.py` (pub/sub) and
 `app/ws_manager.py` (push), never imported by the routers directly.
 
-Rule: rolling per-category z-score.
-  - Look at the trailing N expenses in the same category (excluding the new one).
-  - Require at least MIN_SAMPLES data points before judging — a cold-start
-    category shouldn't trigger false alarms.
+Rule: rolling per-category z-score, scoped to the user.
+  - Look at the trailing N expenses the *same user* logged in the same
+    category (excluding the new one).
+  - If that user doesn't have MIN_SAMPLES data points yet (a brand-new
+    account has zero history in every category), fall back to a cross-user
+    baseline for that category so day-one users still get useful detection —
+    the alert reason says so explicitly rather than silently switching logic.
   - z = (amount - mean) / stddev.
   - z >= CRITICAL_Z  -> "critical"
   - z >= WARNING_Z   -> "warning"
@@ -25,7 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
-from app.models import Alert, Expense
+from app.models import Alert, Category, Expense
 from app.ws_manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
@@ -43,7 +46,7 @@ class AnomalyResult:
     reason: str
 
 
-def detect_anomaly(amount: float, history: list[float]) -> AnomalyResult | None:
+def detect_anomaly(amount: float, history: list[float], *, category_label: str = "category") -> AnomalyResult | None:
     """Pure rule evaluation — no DB, no I/O. Easy to unit test in isolation."""
     if len(history) < MIN_SAMPLES:
         return None
@@ -69,9 +72,21 @@ def detect_anomaly(amount: float, history: list[float]) -> AnomalyResult | None:
     severity = "critical" if z >= CRITICAL_Z else "warning"
     reason = (
         f"Amount {amount:.2f} is {z:.2f} standard deviations above the "
-        f"category mean ({mean:.2f}, n={len(history)})"
+        f"'{category_label}' mean ({mean:.2f}, n={len(history)})"
     )
     return AnomalyResult(severity=severity, z_score=round(z, 2), reason=reason)
+
+
+def _fetch_history(db: Session, expense: Expense, *, scoped_to_user: bool) -> list[float]:
+    stmt = (
+        select(Expense.amount)
+        .where(Expense.category_id == expense.category_id, Expense.id != expense.id)
+        .order_by(Expense.occurred_at.desc())
+        .limit(TRAILING_WINDOW)
+    )
+    if scoped_to_user:
+        stmt = stmt.where(Expense.user_id == expense.user_id)
+    return [float(v) for v in db.execute(stmt).scalars().all()]
 
 
 def evaluate_expense(db: Session, expense_id: int) -> Alert | None:
@@ -80,22 +95,28 @@ def evaluate_expense(db: Session, expense_id: int) -> Alert | None:
     if expense is None:
         return None
 
-    history_rows = db.execute(
-        select(Expense.amount)
-        .where(Expense.category == expense.category, Expense.id != expense.id)
-        .order_by(Expense.occurred_at.desc())
-        .limit(TRAILING_WINDOW)
-    ).scalars().all()
-    history = [float(v) for v in history_rows]
+    history = _fetch_history(db, expense, scoped_to_user=True)
+    used_global_fallback = False
+    if len(history) < MIN_SAMPLES:
+        history = _fetch_history(db, expense, scoped_to_user=False)
+        used_global_fallback = True
 
-    result = detect_anomaly(float(expense.amount), history)
+    category = db.get(Category, expense.category_id)
+    category_label = category.name if category is not None else "category"
+
+    result = detect_anomaly(float(expense.amount), history, category_label=category_label)
     if result is None:
         return None
 
+    reason = result.reason
+    if used_global_fallback:
+        reason += " (cross-user category baseline — not enough personal history yet)"
+
     alert = Alert(
         expense_id=expense.id,
-        reason=result.reason,
+        reason=reason,
         severity=result.severity,
+        source="rule",
         z_score=Decimal(str(result.z_score)),
     )
     db.add(alert)
@@ -109,19 +130,24 @@ async def handle_expense_created(expense_id: int) -> None:
     db = SessionLocal()
     try:
         alert = evaluate_expense(db, expense_id)
+        # Read the relationship while the session is still open — accessing
+        # it after db.close() would trigger a lazy-load on a detached instance.
+        user_id = alert.expense.user_id if alert is not None else None
     finally:
         db.close()
 
     if alert is not None:
         logger.info("Anomaly detected: expense_id=%s severity=%s", expense_id, alert.severity)
         await ws_manager.broadcast(
+            user_id,
             {
                 "type": "alert",
                 "id": alert.id,
                 "expense_id": alert.expense_id,
                 "severity": alert.severity,
+                "source": alert.source,
                 "reason": alert.reason,
                 "z_score": alert.z_score,
                 "created_at": alert.created_at,
-            }
+            },
         )

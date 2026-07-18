@@ -17,7 +17,11 @@ export function AlertsPanel({ alerts, onAck, connected }: Props) {
         {alerts.map((alert) => (
           <li key={alert.id} className={`alert alert--${alert.severity}`}>
             <div>
-              <strong>{alert.severity.toUpperCase()}</strong> — {alert.reason}
+              <strong>{alert.severity.toUpperCase()}</strong>{" "}
+              <span className={`source-badge source-badge--${alert.source}`}>
+                {alert.source === "llm" ? "AI" : "rule"}
+              </span>{" "}
+              — {alert.reason}
               <div className="alert-meta">
                 expense #{alert.expense_id} · {new Date(alert.created_at).toLocaleString()}
               </div>

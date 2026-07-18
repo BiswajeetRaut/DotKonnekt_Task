@@ -2,16 +2,21 @@
 have real signal on first run. Also inserts a couple of deliberate outliers so a
 freshly-seeded dashboard already shows alerts.
 
+Seeds data onto the demo@example.com account created by the auth migration
+(0002_users_and_expense_owner.py) — run `alembic upgrade head` first.
+
 Run with: python -m app.seed
 """
 import random
 from datetime import datetime, timedelta, timezone
 
 from app.analytics.anomaly_service import evaluate_expense
-from app.database import Base, SessionLocal, engine
-from app.models import Expense
+from app.database import SessionLocal
+from app.models import Category, Expense, User
 
 random.seed(7)
+
+DEMO_EMAIL = "demo@example.com"
 
 CATEGORIES = {
     "food": (15, 45),
@@ -27,29 +32,52 @@ OUTLIERS = [
 
 
 def run() -> None:
-    Base.metadata.create_all(bind=engine)
     db = SessionLocal()
     try:
-        if db.query(Expense).count() > 0:
-            print("Expenses already exist — skipping seed.")
+        demo_user = db.query(User).filter(User.email == DEMO_EMAIL).first()
+        if demo_user is None:
+            print(f"No {DEMO_EMAIL} account found — run 'alembic upgrade head' first.")
             return
+
+        if db.query(Expense).filter(Expense.user_id == demo_user.id).count() > 0:
+            print("Demo account already has expenses — skipping seed.")
+            return
+
+        categories: dict[str, Category] = {}
+        for name in CATEGORIES:
+            category = db.query(Category).filter(Category.user_id == demo_user.id, Category.name == name).first()
+            if category is None:
+                category = Category(user_id=demo_user.id, name=name)
+                db.add(category)
+                db.commit()
+                db.refresh(category)
+            categories[name] = category
 
         now = datetime.now(timezone.utc)
         rows = []
-        for category, (lo, hi) in CATEGORIES.items():
-            for i in range(20):
+        for name, (lo, hi) in CATEGORIES.items():
+            for _ in range(20):
                 amount = round(random.uniform(lo, hi), 2)
                 occurred_at = now - timedelta(days=random.randint(0, 60), hours=random.randint(0, 23))
-                rows.append(Expense(amount=amount, category=category, description=f"{category} expense", occurred_at=occurred_at))
+                rows.append(
+                    Expense(
+                        user_id=demo_user.id,
+                        category_id=categories[name].id,
+                        amount=amount,
+                        description=f"{name} expense",
+                        occurred_at=occurred_at,
+                    )
+                )
 
         db.add_all(rows)
         db.commit()
 
         outlier_ids = []
-        for category, amount in OUTLIERS:
+        for name, amount in OUTLIERS:
             outlier = Expense(
+                user_id=demo_user.id,
+                category_id=categories[name].id,
                 amount=amount,
-                category=category,
                 description="unusually large charge",
                 occurred_at=now - timedelta(hours=1),
             )
@@ -58,7 +86,7 @@ def run() -> None:
             db.refresh(outlier)
             outlier_ids.append(outlier.id)
 
-        print(f"Seeded {len(rows)} baseline expenses + {len(outlier_ids)} outliers.")
+        print(f"Seeded {len(rows)} baseline expenses + {len(outlier_ids)} outliers for {DEMO_EMAIL}.")
 
         # Run detection synchronously here (seed script isn't going through the
         # HTTP/event pipeline) so the dashboard has alerts to show on first load.

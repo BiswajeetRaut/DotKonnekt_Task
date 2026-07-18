@@ -4,11 +4,15 @@ A full-stack expense tracker (React + FastAPI + PostgreSQL) with a rule-based
 anomaly detection service that flags unusual spending in real time over
 WebSockets, and optimistic locking to keep concurrent edits safe.
 
-Built for the dotkonnekt Full Stack Assessment — Project A.
+Built for the dotkonnekt Full Stack Assessment — Project A. Since the
+original submission (tagged `v1.0`), a multi-user auth layer has been added
+on top (see "V2 additions" below) as an extension beyond the assessment scope.
 
-> Supporting docs: [docs/DESIGN.md](docs/DESIGN.md) (architecture, schema,
-> anomaly rule, concurrency) and [docs/ROADMAP.md](docs/ROADMAP.md) (task
-> breakdown used during the build).
+> Supporting docs: [docs/DESIGN.md](docs/DESIGN.md) (v1.0 architecture,
+> schema, anomaly rule, concurrency), [docs/ROADMAP.md](docs/ROADMAP.md)
+> (v1.0 task breakdown), [docs/V2_DESIGN.md](docs/V2_DESIGN.md) (auth,
+> custom categories, Redis, LLM signal, email, chatbot — architecture) and
+> [docs/V2_ROADMAP.md](docs/V2_ROADMAP.md) (what's built vs. still planned).
 
 ## What works
 
@@ -35,32 +39,86 @@ concurrent `PUT`s, an anomaly firing end-to-end from `POST /expenses` through
 the event bus to a connected WebSocket client, and the dashboard rendering
 real data in a browser (screenshots taken with Playwright during the build).
 
+## V2 additions (post-submission, beyond the assessment scope)
+
+- **Auth & multi-tenancy**: JWT sessions in an httpOnly cookie, `POST
+  /auth/register`, `/login`, `/logout`, `GET /auth/me`. Every expense/alert
+  is scoped to its owner — verified directly that a second account sees zero
+  of the first account's data.
+- **Per-user anomaly baselines with a cold-start fallback**: the z-score
+  rule now runs against the logged-in user's own trailing history; a
+  brand-new account with no history yet falls back to a cross-user category
+  baseline, and the alert reason says so explicitly rather than silently
+  behaving differently.
+- **WebSocket auth**: `/ws/alerts` reads the same httpOnly cookie at the
+  handshake (browsers send cookies automatically on same-site WebSocket
+  connections — no token-in-URL needed) and only pushes alerts to the
+  connected user's own sockets. Verified: an unauthenticated connection
+  attempt is rejected with HTTP 403 before `accept()`.
+- **Custom per-user categories**: a `categories` table replaces the old
+  free-text column; each user manages their own list (add/delete) from the
+  dashboard. Deleting a category that still has expenses on it is blocked
+  with `409`, not silently orphaned.
+- **Redis-backed event bus + WebSocket fan-out**: `app/events.py` and
+  `app/ws_manager.py` now run on real Redis Pub/Sub instead of an in-process
+  list, so the analytics service and alert delivery aren't tied to a single
+  process anymore. Verified against a real local Redis instance, full round
+  trip (expense created → Redis → analytics service → Alert written → Redis
+  → WebSocket push). Honest caveat documented directly in `events.py`:
+  Pub/Sub is fan-out, which is correct for one backend instance but would
+  need Redis Streams + a consumer group to avoid duplicate processing if the
+  analytics service is ever scaled to multiple instances — not built, since
+  that's real added complexity disproportionate to a single-instance app.
+- **LLM secondary anomaly signal**: `app/analytics/llm_signal.py` is a
+  second, independent subscriber on the same `expense.created` event as the
+  z-score rule — it catches semantic mismatches (a description that doesn't
+  fit its category) that a purely numeric rule structurally cannot, using
+  OpenAI (`gpt-4o-mini`) with a structured-output schema. Gated to run only
+  on cold-start categories or borderline z-scores to control cost. Verified
+  live against the real OpenAI API: correctly flagged "concert tickets"
+  logged under "utilities," did *not* flag a legitimate "monthly electricity
+  bill" in the same category, and correctly stayed silent when the rule-based
+  detector had already caught an expense. Alerts carry a `source: "rule" |
+  "llm"` field; the dashboard shows a color-coded badge for each.
+- Still planned, not yet built: email notifications and a RAG chatbot over
+  expenses/alerts — see [docs/V2_ROADMAP.md](docs/V2_ROADMAP.md) for the
+  phase-by-phase plan.
+
 ## Architecture at a glance
 
 ```
-React dashboard  ──REST──▶  FastAPI routers (expenses, alerts)
+React dashboard  ──REST──▶  FastAPI routers (auth, categories, expenses, alerts)
        ▲                          │
-       │ WebSocket                │ BackgroundTask publishes "expense.created"
-       │ (push)                   ▼
-       └──────────────── analytics/anomaly_service.py
-                          (rolling z-score, writes Alert, broadcasts)
-                                   │
-                                   ▼
-                              PostgreSQL
+       │ WebSocket                │ publishes "expense.created" to Redis
+       │ (push, via Redis         ▼
+       │  alerts_broadcast)  Redis Pub/Sub ── expense_created channel
+       │                          │
+       │                          ├──▶ analytics/anomaly_service.py (rule, z-score)
+       │                          └──▶ analytics/llm_signal.py (OpenAI, semantic check)
+       │                                   │              │
+       │                                   ▼              ▼
+       └───────────────────────────  writes Alert (source: rule | llm)
+                                            │
+                                            ▼
+                                       PostgreSQL
 ```
 
 The CRUD router never imports anomaly logic — it publishes an event and
-moves on. The analytics service is the only subscriber, has no FastAPI/HTTP
-dependency, and could be lifted into its own process/consumer without
-touching the router. Full rationale in [docs/DESIGN.md](docs/DESIGN.md).
+moves on. Both analytics services subscribe independently to the same
+event; neither has a FastAPI/HTTP dependency, and either could be lifted
+into its own process without touching the router. Full rationale in
+[docs/DESIGN.md](docs/DESIGN.md) (v1.0) and [docs/V2_DESIGN.md](docs/V2_DESIGN.md)
+(auth, categories, Redis, LLM signal).
 
 ## Data model
 
 ```
-expenses (id, amount, category, description, occurred_at, created_at,
-          updated_at, version)
-alerts   (id, expense_id -> expenses.id, reason, severity, z_score,
-          created_at, acknowledged)
+users      (id, email, hashed_password, created_at)
+categories (id, user_id -> users.id, name, created_at)
+expenses   (id, user_id -> users.id, category_id -> categories.id, amount,
+            description, occurred_at, created_at, updated_at, version)
+alerts     (id, expense_id -> expenses.id, reason, severity,
+            source ['rule'|'llm'], z_score, created_at, acknowledged)
 ```
 
 One expense → zero-or-more alerts. See [docs/DESIGN.md §3](docs/DESIGN.md)
@@ -80,6 +138,33 @@ Rolling per-category z-score, implemented as a pure function
 Deliberately simple and explainable over a black-box model — an interviewer
 can verify a flagged alert by hand. Full detail in
 [docs/DESIGN.md §4](docs/DESIGN.md).
+
+## LLM secondary anomaly signal (V2)
+
+`app/analytics/llm_signal.py` is a second, independent subscriber on the
+same `expense.created` event — not a replacement for the z-score rule, a
+complement to it. It catches a failure mode the numeric rule structurally
+can't: a description that doesn't match its category, even when the amount
+itself is completely unremarkable (a rule based purely on amount has no
+signal to work with there at all).
+
+- Uses OpenAI (`gpt-4o-mini`) with a Pydantic-validated structured-output
+  schema (`{flagged: bool, reason: str}`) — not free-text parsing.
+- **Cost gate**: only invoked when the numeric rule is inconclusive —
+  cold-start categories (not enough history for the rule to judge) or a
+  borderline z-score (elevated but under the rule's own warning threshold).
+  Skipped entirely when the rule already fired, or the expense is
+  numerically unremarkable with plenty of history. This is a deliberate
+  trade-off: a normal-looking amount with a wildly wrong category (no
+  numeric signal at all) can slip through both gates — noted honestly in
+  Known Limitations rather than solved by running the LLM on every expense.
+- Requires `OPENAI_API_KEY` in `.env`; runs the rule-only detector if unset.
+- Verified live against the real API: correctly flagged "concert tickets"
+  logged under "utilities" and a second mismatched entry, did *not* flag a
+  legitimate "monthly electricity bill" in the same category, and correctly
+  stayed silent on an expense the rule-based detector had already caught.
+- Alerts carry `source: "rule" | "llm"`; the dashboard shows a color-coded
+  badge so it's clear which detector raised each one.
 
 ## Ideation angle: real-time strategy — WebSockets vs. polling
 
@@ -114,12 +199,15 @@ carry `expense.created` / `expense.updated` events too — the event bus
 already supports adding more event types and subscribers without touching the
 router again.
 
-**In production at scale**, the one thing that would need to change: with
-more than one backend process, in-memory `ConnectionManager` state (which
-sockets are connected) wouldn't be shared across instances. That needs a
-pub/sub layer (Redis pub/sub, or the same broker used for the event bus) so
-any instance can broadcast to a socket held by another instance. Noted in
-Known Limitations below.
+**Update (V2):** this is no longer purely theoretical — the event bus and
+alert broadcast now run on real Redis Pub/Sub (`app/events.py`,
+`app/ws_manager.py`), specifically so that a second backend instance's
+locally-connected socket can still receive an alert raised by the instance
+that handled the write. See the "Redis-backed event bus" note above and
+[docs/V2_DESIGN.md](docs/V2_DESIGN.md) Phase C for the full reasoning,
+including the one caveat that's *not* solved by Pub/Sub (duplicate
+processing if the analytics service itself is scaled to multiple
+consumers — would need Redis Streams + a consumer group for that).
 
 ## Concurrency: how race conditions are avoided
 
@@ -143,9 +231,11 @@ guaranteeing no lost updates.
 
 ## Running it locally
 
-Requires Python 3.11+, Node 20+/21, and a running PostgreSQL instance.
-(Docker Compose files are included but **not verified in this environment** —
-see Known Limitations.)
+Requires Python 3.11+, Node 20+/21, a running PostgreSQL instance, and a
+running Redis instance (`brew install redis && brew services start redis`,
+or any local Redis — no auth needed for local dev, just the default
+`redis://localhost:6379/0`). Docker Compose files are included but **not
+verified in this environment** — see Known Limitations.
 
 ### 1. Database
 
@@ -164,11 +254,22 @@ cd backend
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env   # edit DATABASE_URL if your Postgres isn't on the default port
-alembic upgrade head
+cp .env.example .env   # edit DATABASE_URL/REDIS_URL if not on default ports;
+                       # set OPENAI_API_KEY to enable the LLM secondary signal (optional)
+alembic upgrade head   # also creates a demo@example.com / demo1234 account and
+                       # backfills any pre-auth seed data to it
 python -m app.seed     # optional but recommended — backfills sample data + 2 outliers
 uvicorn app.main:app --reload --port 8000
 ```
+
+**Auth (added in V2):** the API now requires a session. Log in through the
+dashboard with `demo@example.com` / `demo1234` (created by the migration), or
+register a new account — new accounts start with zero data and see their own
+expenses only. See [docs/V2_DESIGN.md](docs/V2_DESIGN.md) for the full design
+(JWT-in-httpOnly-cookie, per-user anomaly baselines with a cross-user
+cold-start fallback) and [docs/V2_ROADMAP.md](docs/V2_ROADMAP.md) for what's
+built vs. still planned (custom categories, Redis event bus, an LLM secondary
+anomaly signal, email notifications, and a RAG chatbot).
 
 API docs at `http://localhost:8000/docs`. Health check at `/health`.
 
@@ -202,39 +303,65 @@ as unverified until you've run it once.
 
 | Method | Path | Notes |
 |---|---|---|
-| `POST` | `/expenses` | Create; publishes `expense.created` event after commit |
-| `GET` | `/expenses` | List; filters: `category`, `start_date`, `end_date`, `limit`, `offset` |
-| `GET` | `/expenses/{id}` | Fetch one |
+| `POST` | `/auth/register` | Create account; sets the session cookie |
+| `POST` | `/auth/login` | Sets the session cookie |
+| `POST` | `/auth/logout` | Clears the session cookie |
+| `GET` | `/auth/me` | Current user; `401` if not authenticated |
+| `GET` | `/categories` | List caller's categories |
+| `POST` | `/categories` | Create; `409` on duplicate name |
+| `DELETE` | `/categories/{id}` | Delete; `409` if expenses still use it |
+| `POST` | `/expenses` | Create (scoped to caller); publishes `expense.created` event after commit |
+| `GET` | `/expenses` | List (scoped to caller); filters: `category_id`, `start_date`, `end_date`, `limit`, `offset` |
+| `GET` | `/expenses/{id}` | Fetch one; `404` if it's not yours |
 | `PUT` | `/expenses/{id}` | Update; requires `version`; `409` on stale version |
 | `DELETE` | `/expenses/{id}` | Delete (cascades its alerts) |
-| `GET` | `/alerts` | List; filter by `acknowledged` |
+| `GET` | `/alerts` | List (scoped to caller); filter by `acknowledged`; each has `source: "rule" \| "llm"` |
 | `PATCH` | `/alerts/{id}/ack` | Acknowledge an alert |
-| `WS` | `/ws/alerts` | Live alert push |
+| `WS` | `/ws/alerts` | Live alert push; requires the session cookie, delivers only the caller's own alerts |
+
+All routes except `/auth/*` and `/health` require an authenticated session
+(the httpOnly cookie set by `/auth/login` or `/auth/register`); requests
+without it get `401`.
 
 ## Known limitations
 
-- **No auth / single shared workspace.** Every client sees the same data;
-  there's no login or per-user isolation. Out of scope for the time box.
+- **No refresh-token rotation.** A single access token (60 min default) —
+  session just expires and requires re-login. No password reset or email
+  verification flow either. Fine for this scope; a real product needs both.
+- **Auth is per-account, not per-team.** Each user sees only their own data;
+  there's no sharing/org concept.
 - **Rolling-window contamination.** The z-score's trailing window can include
   a previous outlier (e.g. a prior spike still within the last 20 records),
   which inflates the mean/stddev and can suppress detection of a second,
   smaller anomaly shortly after a big one. Observed directly during testing.
   A more robust version would use a robust statistic (median + MAD) or
   exclude previously-flagged expenses from the training window.
-- **In-process event bus, not a real broker.** `app/events.py` is a
-  same-process pub/sub, not Kafka/Redis Streams. Fine for one backend
-  instance; would need a real broker (and a shared pub/sub for WebSocket
-  fan-out) to scale horizontally across multiple backend processes.
+- **Redis Pub/Sub is fan-out, not a work queue.** `app/events.py` now runs
+  on real Redis (V2), which correctly solves WebSocket delivery across
+  multiple backend instances. But if the analytics service itself were ever
+  scaled to multiple consumer instances, every instance would independently
+  process every event and could each write a duplicate Alert — Pub/Sub has
+  no "exactly one consumer" semantics. Redis Streams with a consumer group
+  would be the correct fix; not built, since it's real added complexity
+  (XACK, pending-entry handling) disproportionate to the single-instance
+  deployment this app actually runs as. Documented directly in `events.py`.
+- **LLM signal has a cold-start/borderline-only gate.** A normal-looking
+  amount filed under a badly wrong category, with plenty of prior history in
+  that category (so the numeric rule is confident it's "normal"), won't
+  trigger the LLM check under the current cost gate. Running the LLM on
+  every expense would catch that too, at full per-expense cost — a
+  configurable "always check" mode is a reasonable follow-up, not built here.
 - **No automated test suite.** Verification for this build was done by
   direct exercise (curl/Python scripts hitting the running API, a Playwright
   screenshot of the dashboard) rather than a committed pytest/Vitest suite —
   a real follow-up would add unit tests for `detect_anomaly` (pure function,
-  easy to test) and the optimistic-locking conflict path.
-- **Docker Compose is unverified**, as noted above.
-- **Categories are free text**, not a managed lookup table — no admin UI to
-  rename/merge categories.
-- **No ML-based model** (bonus item) — z-score rule only, by design, to keep
-  the detection logic explainable within the time box.
+  easy to test), the LLM gate's `_should_invoke`, and the optimistic-locking
+  conflict path.
+- **Docker Compose is unverified**, as noted above (now includes a `redis`
+  service alongside `db`/`backend`/`frontend`, same caveat applies).
+- **No ML-based forecasting model** — the rule-based z-score and the LLM
+  semantic check cover the "bonus" ground differently (statistical +
+  semantic) rather than via a trained forecasting/isolation-forest model.
 - **Pagination is basic** limit/offset, no cursor-based pagination.
 
 ## Repo layout
@@ -242,19 +369,24 @@ as unverified until you've run it once.
 ```
 backend/
   app/
-    routers/        # CRUD-only route handlers (expenses, alerts)
-    analytics/       # anomaly detection — separate from routers
-    events.py        # in-process pub/sub connecting CRUD -> analytics
-    ws_manager.py    # WebSocket broadcast
+    routers/         # CRUD-only route handlers (auth, categories, expenses, alerts)
+    analytics/        # anomaly_service.py (rule) + llm_signal.py (OpenAI) — separate from routers
+    auth.py           # password hashing, JWT issue/verify
+    dependencies.py   # get_current_user
+    events.py         # Redis Pub/Sub connecting CRUD -> analytics (both subscribers)
+    ws_manager.py     # Redis-backed WebSocket broadcast, per-user delivery
     models.py, schemas.py, database.py, config.py
-  alembic/           # migrations
+  alembic/            # migrations (0001 initial, 0002 auth, 0003 categories, 0004 alert source)
 docs/
-  DESIGN.md          # architecture, schema, anomaly rule, concurrency detail
-  ROADMAP.md         # task breakdown used during the build
+  DESIGN.md           # v1.0 architecture, schema, anomaly rule, concurrency detail
+  ROADMAP.md          # v1.0 task breakdown
+  V2_DESIGN.md        # auth, categories, Redis, LLM signal, email, chatbot — architecture
+  V2_ROADMAP.md       # V2 task breakdown, phase by phase
 frontend/
   src/
-    components/      # ExpenseForm, ExpenseTable, SpendingChart, AlertsPanel
+    auth/             # AuthContext, AuthPage (login/register)
+    components/       # ExpenseForm, ExpenseTable, SpendingChart, AlertsPanel, CategoryManager
     hooks/            # useWebSocketAlerts
-    api.ts
+    Dashboard.tsx, api.ts
 docker-compose.yml
 ```

@@ -6,7 +6,8 @@ export function SpendingChart({ expenses }: { expenses: Expense[] }) {
   const data = useMemo(() => {
     const totals = new Map<string, number>();
     for (const expense of expenses) {
-      totals.set(expense.category, (totals.get(expense.category) || 0) + Number(expense.amount));
+      const name = expense.category.name;
+      totals.set(name, (totals.get(name) || 0) + Number(expense.amount));
     }
     return Array.from(totals.entries()).map(([category, total]) => ({
       category,
