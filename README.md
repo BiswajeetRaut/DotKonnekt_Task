@@ -8,11 +8,65 @@ Built for the dotkonnekt Full Stack Assessment — Project A. Since the
 original submission (tagged `v1.0`), a multi-user auth layer has been added
 on top (see "V2 additions" below) as an extension beyond the assessment scope.
 
-> Supporting docs: [docs/DESIGN.md](docs/DESIGN.md) (v1.0 architecture,
-> schema, anomaly rule, concurrency), [docs/ROADMAP.md](docs/ROADMAP.md)
-> (v1.0 task breakdown), [docs/V2_DESIGN.md](docs/V2_DESIGN.md) (auth,
-> custom categories, Redis, LLM signal, email, chatbot — architecture) and
-> [docs/V2_ROADMAP.md](docs/V2_ROADMAP.md) (what's built vs. still planned).
+> Supporting docs: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) (system
+> diagram, ER diagram, sequence flows, component-by-component reference —
+> start here for the full technical picture), [docs/DESIGN.md](docs/DESIGN.md)
+> (v1.0 architecture, schema, anomaly rule, concurrency),
+> [docs/ROADMAP.md](docs/ROADMAP.md) (v1.0 task breakdown),
+> [docs/V2_DESIGN.md](docs/V2_DESIGN.md) (auth, custom categories, Redis, LLM
+> signal, chatbot — design decisions) and
+> [docs/V2_ROADMAP.md](docs/V2_ROADMAP.md) (what's built vs. still planned,
+> phase by phase, with what was verified at each step).
+
+## Screenshots & walkthrough
+
+All screenshots below are from one continuous live run against the actual
+running app (not mockups) — registering a brand-new account, building up
+data, and triggering both anomaly detectors and the chatbot for real.
+
+**1. Sign in / register.** JWT session in an httpOnly cookie; a fresh
+account starts with zero data.
+
+<img src="docs/screenshots/01_login.png" width="440" alt="Login page">
+<img src="docs/screenshots/02_register.png" width="440" alt="Register page">
+
+**2. Day one — empty state.** No categories, no expenses, no alerts. The
+form and table both handle this explicitly rather than showing a broken
+empty chart or an infinite spinner.
+
+<img src="docs/screenshots/03_empty_dashboard.png" width="720" alt="Empty dashboard right after signup">
+
+**3. The full dashboard, populated.** Categories added, ~17 expenses logged
+across 6 categories, a live spending-by-category chart, and two anomaly
+alerts already fired in real time as the triggering expenses were logged —
+no page refresh involved.
+
+<img src="docs/screenshots/04_dashboard_full.png" width="720" alt="Full populated dashboard">
+
+**4. Both anomaly detectors, side by side.** The chart (all 6 categories
+correctly labeled), and the alerts panel showing one alert from each
+detector:
+- **RULE** (blue badge) — the numeric z-score detector: a $480 "Emergency
+  car repair" is 146.86 standard deviations above this category's $20.25
+  mean.
+- **AI** (green badge) — the OpenAI-based semantic detector: a $55 "Concert
+  tickets for the weekend" is a completely unremarkable amount, but its
+  description doesn't match the "Rent" category it was filed under — a
+  mismatch the numeric rule structurally cannot see, since nothing about
+  $55 is statistically unusual.
+
+<img src="docs/screenshots/05_chart_and_alerts.png" width="480" alt="Spending chart and both alert types">
+
+**5. The chatbot answering real questions about this exact data**, live,
+via agentic RAG (the model chooses between a semantic-search tool and a
+constrained aggregate-query tool per question — see
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how):
+
+<img src="docs/screenshots/06_chatbot.png" width="720" alt="Chatbot conversation">
+
+The "$164.35" answer above was checked by hand against a raw SQL `SUM()`
+query on the same account and matched exactly — the chatbot is grounded in
+real data, not generating plausible-sounding numbers.
 
 ## What works
 
@@ -470,10 +524,12 @@ backend/
   alembic/             # migrations (0001 initial, 0002 auth, 0003 categories,
                        # 0004 alert source, 0005 chatbot/pgvector)
 docs/
+  ARCHITECTURE.md      # system diagram, ER diagram, sequence flows, component reference
   DESIGN.md            # v1.0 architecture, schema, anomaly rule, concurrency detail
   ROADMAP.md           # v1.0 task breakdown
   V2_DESIGN.md         # auth, categories, Redis, LLM signal, chatbot — architecture
   V2_ROADMAP.md        # V2 task breakdown, phase by phase, what's verified
+  screenshots/         # live-run screenshots referenced in the README walkthrough
 frontend/
   src/
     auth/              # AuthContext, AuthPage (login/register)
