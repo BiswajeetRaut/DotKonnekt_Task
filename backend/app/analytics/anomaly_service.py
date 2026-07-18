@@ -28,6 +28,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.events import publish_alert_created
 from app.models import Alert, Category, Expense
 from app.ws_manager import manager as ws_manager
 
@@ -138,6 +139,7 @@ async def handle_expense_created(expense_id: int) -> None:
 
     if alert is not None:
         logger.info("Anomaly detected: expense_id=%s severity=%s", expense_id, alert.severity)
+        await publish_alert_created(alert.id)
         await ws_manager.broadcast(
             user_id,
             {

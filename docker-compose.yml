@@ -1,6 +1,8 @@
 services:
   db:
-    image: postgres:16-alpine
+    # pgvector/pgvector ships the pgvector extension pre-built (needed for
+    # the chatbot's knowledge_chunks table) — plain postgres:16 doesn't have it.
+    image: pgvector/pgvector:pg16
     restart: unless-stopped
     environment:
       POSTGRES_USER: expense
@@ -33,6 +35,10 @@ services:
     environment:
       DATABASE_URL: postgresql+psycopg2://expense:expense@db:5432/expense_tracker
       REDIS_URL: redis://redis:6379/0
+      # Optional — enables the LLM secondary anomaly signal and the RAG
+      # chatbot. Set via a root-level .env file or your shell environment;
+      # leave unset to run with the rule-based detector only.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
     ports:
       - "8000:8000"
     depends_on:

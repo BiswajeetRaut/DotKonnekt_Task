@@ -80,45 +80,66 @@ real data in a browser (screenshots taken with Playwright during the build).
   bill" in the same category, and correctly stayed silent when the rule-based
   detector had already caught an expense. Alerts carry a `source: "rule" |
   "llm"` field; the dashboard shows a color-coded badge for each.
-- Still planned, not yet built: email notifications and a RAG chatbot over
-  expenses/alerts — see [docs/V2_ROADMAP.md](docs/V2_ROADMAP.md) for the
-  phase-by-phase plan.
+- **Chatbot / RAG over expenses & alerts**: a `knowledge_chunks` table
+  (pgvector) holds OpenAI embeddings of every expense/alert, populated by an
+  indexer subscribed to the same event bus. The chat endpoint uses **agentic
+  RAG** — the model (`gpt-4o-mini`) picks between two tools per question:
+  `search_similar` (semantic search, for "why"/"which" questions) and
+  `run_aggregate_query` (a constrained, parameterized query — never
+  free-form SQL — for "how much"/"how many" questions). Verified live: two
+  aggregate answers matched a raw SQL `SUM()` exactly (no hallucinated
+  numbers), and a semantic question about a specific expense was answered
+  correctly. One real gap found and fixed during verification: the indexer
+  only covers new data going forward, so pre-existing expenses/alerts needed
+  a one-time backfill script (`app/chat/backfill.py`) — without it, the bot
+  answered a question about an old alert by confidently guessing wrong,
+  because nothing relevant was actually indexed yet. Full story in
+  [docs/V2_DESIGN.md](docs/V2_DESIGN.md) Phase F, including the pgvector
+  local-build friction (missing SDK, `-march=native` issue) worked through
+  to get it running.
+- Still planned, not yet built: email notifications — see
+  [docs/V2_ROADMAP.md](docs/V2_ROADMAP.md) for the phase-by-phase plan.
 
 ## Architecture at a glance
 
 ```
-React dashboard  ──REST──▶  FastAPI routers (auth, categories, expenses, alerts)
-       ▲                          │
-       │ WebSocket                │ publishes "expense.created" to Redis
-       │ (push, via Redis         ▼
-       │  alerts_broadcast)  Redis Pub/Sub ── expense_created channel
-       │                          │
-       │                          ├──▶ analytics/anomaly_service.py (rule, z-score)
-       │                          └──▶ analytics/llm_signal.py (OpenAI, semantic check)
-       │                                   │              │
-       │                                   ▼              ▼
-       └───────────────────────────  writes Alert (source: rule | llm)
-                                            │
-                                            ▼
-                                       PostgreSQL
+React dashboard  ──REST──▶  FastAPI routers (auth, categories, expenses, alerts, chat)
+       ▲    ▲                      │
+       │    │ POST /chat           │ publishes "expense.created"/"alert.created" to Redis
+       │    ▼                      ▼
+       │  chat/service.py ◀── Redis Pub/Sub ── expense_created, alert_created channels
+       │  (agentic RAG:            │
+       │   search_similar +        ├──▶ analytics/anomaly_service.py (rule, z-score)
+       │   run_aggregate_query)    ├──▶ analytics/llm_signal.py (OpenAI, semantic check)
+       │       ▲                   └──▶ chat/indexer.py (embeds into knowledge_chunks)
+       │       │ vector search            │              │
+       │ WebSocket                        ▼              ▼
+       │ (push, via Redis           writes Alert (source: rule | llm)
+       │  alerts_broadcast)               │
+       └───────────────────────────       ▼
+                                      PostgreSQL (+ pgvector)
 ```
 
 The CRUD router never imports anomaly logic — it publishes an event and
-moves on. Both analytics services subscribe independently to the same
-event; neither has a FastAPI/HTTP dependency, and either could be lifted
-into its own process without touching the router. Full rationale in
-[docs/DESIGN.md](docs/DESIGN.md) (v1.0) and [docs/V2_DESIGN.md](docs/V2_DESIGN.md)
-(auth, categories, Redis, LLM signal).
+moves on. All three subscribers (rule detector, LLM signal, chat indexer)
+subscribe independently to the same events; none has a FastAPI/HTTP
+dependency, and any could be lifted into its own process without touching
+the router. Full rationale in [docs/DESIGN.md](docs/DESIGN.md) (v1.0) and
+[docs/V2_DESIGN.md](docs/V2_DESIGN.md) (auth, categories, Redis, LLM signal,
+chatbot).
 
 ## Data model
 
 ```
-users      (id, email, hashed_password, created_at)
-categories (id, user_id -> users.id, name, created_at)
-expenses   (id, user_id -> users.id, category_id -> categories.id, amount,
-            description, occurred_at, created_at, updated_at, version)
-alerts     (id, expense_id -> expenses.id, reason, severity,
-            source ['rule'|'llm'], z_score, created_at, acknowledged)
+users            (id, email, hashed_password, created_at)
+categories       (id, user_id -> users.id, name, created_at)
+expenses         (id, user_id -> users.id, category_id -> categories.id,
+                  amount, description, occurred_at, created_at, updated_at, version)
+alerts           (id, expense_id -> expenses.id, reason, severity,
+                  source ['rule'|'llm'], z_score, created_at, acknowledged)
+knowledge_chunks (id, user_id -> users.id, source_type ['expense'|'alert'],
+                  source_id, content, embedding vector(1536), created_at)
+chat_messages    (id, user_id -> users.id, role ['user'|'assistant'], content, created_at)
 ```
 
 One expense → zero-or-more alerts. See [docs/DESIGN.md §3](docs/DESIGN.md)
@@ -231,11 +252,13 @@ guaranteeing no lost updates.
 
 ## Running it locally
 
-Requires Python 3.11+, Node 20+/21, a running PostgreSQL instance, and a
-running Redis instance (`brew install redis && brew services start redis`,
-or any local Redis — no auth needed for local dev, just the default
-`redis://localhost:6379/0`). Docker Compose files are included but **not
-verified in this environment** — see Known Limitations.
+Requires Python 3.11+, Node 20+/21, a running PostgreSQL instance with the
+`pgvector` extension available, and a running Redis instance (`brew install
+redis && brew services start redis`, or any local Redis — no auth needed for
+local dev, just the default `redis://localhost:6379/0`). Docker Compose
+files are included but **not verified in this environment** — see Known
+Limitations; the `db` service there uses `pgvector/pgvector:pg16`, which has
+the extension pre-built.
 
 ### 1. Database
 
@@ -247,6 +270,18 @@ CREATE ROLE expense LOGIN PASSWORD 'expense';
 CREATE DATABASE expense_tracker OWNER expense;
 ```
 
+**pgvector**, needed for the chatbot (Phase F): on a fresh Postgres install
+this is usually one command (`brew install pgvector` for a Homebrew
+Postgres, or use a Docker image that bundles it, like
+`pgvector/pgvector:pg16`). On this build's specific machine — an older EDB
+installer distribution on unsupported macOS 12 — it had to be built from
+source with two non-obvious fixes; see
+[docs/V2_DESIGN.md](docs/V2_DESIGN.md) Phase F if you hit the same
+`-march=native` or missing-SDK errors. Once installed, `CREATE EXTENSION
+vector;` is handled automatically by the Alembic migration
+(`0005_chatbot.py`) — no manual SQL needed beyond getting the extension
+binary in place.
+
 ### 2. Backend
 
 ```bash
@@ -255,10 +290,13 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env   # edit DATABASE_URL/REDIS_URL if not on default ports;
-                       # set OPENAI_API_KEY to enable the LLM secondary signal (optional)
-alembic upgrade head   # also creates a demo@example.com / demo1234 account and
-                       # backfills any pre-auth seed data to it
-python -m app.seed     # optional but recommended — backfills sample data + 2 outliers
+                       # set OPENAI_API_KEY to enable the LLM signal + chatbot (optional)
+alembic upgrade head   # also creates a demo@example.com / demo1234 account,
+                       # backfills any pre-auth seed data to it, and enables pgvector
+python -m app.seed             # optional but recommended — backfills sample data + 2 outliers
+python -m app.chat.backfill    # optional — embeds existing expenses/alerts so the
+                               # chatbot can answer questions about them (only
+                               # needed if OPENAI_API_KEY is set; safe to re-run)
 uvicorn app.main:app --reload --port 8000
 ```
 
@@ -318,6 +356,8 @@ as unverified until you've run it once.
 | `GET` | `/alerts` | List (scoped to caller); filter by `acknowledged`; each has `source: "rule" \| "llm"` |
 | `PATCH` | `/alerts/{id}/ack` | Acknowledge an alert |
 | `WS` | `/ws/alerts` | Live alert push; requires the session cookie, delivers only the caller's own alerts |
+| `POST` | `/chat` | Ask a question; runs the agentic-RAG tool-calling loop, persists both messages |
+| `GET` | `/chat/history` | Full conversation history for the caller |
 
 All routes except `/auth/*` and `/health` require an authenticated session
 (the httpOnly cookie set by `/auth/login` or `/auth/register`); requests
@@ -351,14 +391,47 @@ without it get `401`.
   trigger the LLM check under the current cost gate. Running the LLM on
   every expense would catch that too, at full per-expense cost — a
   configurable "always check" mode is a reasonable follow-up, not built here.
+- **The chatbot only auto-indexes new data.** `app/chat/indexer.py` embeds
+  expenses/alerts as they're created (event-driven, by design). Anything
+  that existed before the chatbot feature was added needs the one-time
+  `python -m app.chat.backfill` — without it, a question about old data gets
+  answered from whatever *is* indexed, which can be wrong (hit this directly
+  during verification: see docs/V2_ROADMAP.md Phase F). Safe to re-run;
+  not automatic on every startup, so a fresh clone that skips this step will
+  have a chatbot that only knows about expenses logged after setup.
+- **Chat responses aren't streamed.** `POST /chat` waits for the full
+  tool-calling loop then returns one JSON response — no token-by-token
+  streaming (SSE/WebSocket). Fine for the question complexity this app
+  actually has (answers are short); a real chat product would stream.
+- **No RAG evaluation harness.** Verification was a handful of manual
+  questions with known-correct answers checked by hand (see Phase F in
+  V2_ROADMAP.md) — no systematic eval set, no check for hallucination rate
+  at scale.
+- **Redis Pub/Sub is fan-out, not a work queue.** `app/events.py` now runs
+  on real Redis (V2), which correctly solves WebSocket delivery across
+  multiple backend instances. But if the analytics service itself were ever
+  scaled to multiple consumer instances, every instance would independently
+  process every event and could each write a duplicate Alert — Pub/Sub has
+  no "exactly one consumer" semantics. Redis Streams with a consumer group
+  would be the correct fix; not built, since it's real added complexity
+  (XACK, pending-entry handling) disproportionate to the single-instance
+  deployment this app actually runs as. Documented directly in `events.py`.
+- **LLM signal has a cold-start/borderline-only gate.** A normal-looking
+  amount filed under a badly wrong category, with plenty of prior history in
+  that category (so the numeric rule is confident it's "normal"), won't
+  trigger the LLM check under the current cost gate. Running the LLM on
+  every expense would catch that too, at full per-expense cost — a
+  configurable "always check" mode is a reasonable follow-up, not built here.
 - **No automated test suite.** Verification for this build was done by
-  direct exercise (curl/Python scripts hitting the running API, a Playwright
-  screenshot of the dashboard) rather than a committed pytest/Vitest suite —
-  a real follow-up would add unit tests for `detect_anomaly` (pure function,
-  easy to test), the LLM gate's `_should_invoke`, and the optimistic-locking
-  conflict path.
-- **Docker Compose is unverified**, as noted above (now includes a `redis`
-  service alongside `db`/`backend`/`frontend`, same caveat applies).
+  direct exercise (curl/Python scripts hitting the running API, a raw
+  websockets client, and Playwright screenshots of the dashboard) rather
+  than a committed pytest/Vitest suite — a real follow-up would add unit
+  tests for `detect_anomaly` (pure function, easy to test), the LLM gate's
+  `_should_invoke`, `run_aggregate_query`'s filter logic, and the
+  optimistic-locking conflict path.
+- **Docker Compose is unverified**, as noted above (now includes `redis`
+  and a `pgvector/pgvector:pg16` `db` image alongside `backend`/`frontend`,
+  same caveat applies).
 - **No ML-based forecasting model** — the rule-based z-score and the LLM
   semantic check cover the "bonus" ground differently (statistical +
   semantic) rather than via a trained forecasting/isolation-forest model.
@@ -369,24 +442,27 @@ without it get `401`.
 ```
 backend/
   app/
-    routers/         # CRUD-only route handlers (auth, categories, expenses, alerts)
-    analytics/        # anomaly_service.py (rule) + llm_signal.py (OpenAI) — separate from routers
-    auth.py           # password hashing, JWT issue/verify
-    dependencies.py   # get_current_user
-    events.py         # Redis Pub/Sub connecting CRUD -> analytics (both subscribers)
-    ws_manager.py     # Redis-backed WebSocket broadcast, per-user delivery
+    routers/          # CRUD-only route handlers (auth, categories, expenses, alerts, chat)
+    analytics/         # anomaly_service.py (rule) + llm_signal.py (OpenAI) — separate from routers
+    chat/              # embeddings.py, indexer.py, tools.py (agentic RAG), service.py, backfill.py
+    auth.py            # password hashing, JWT issue/verify
+    dependencies.py    # get_current_user
+    events.py          # Redis Pub/Sub, multi-channel (expense_created, alert_created)
+    ws_manager.py      # Redis-backed WebSocket broadcast, per-user delivery
     models.py, schemas.py, database.py, config.py
-  alembic/            # migrations (0001 initial, 0002 auth, 0003 categories, 0004 alert source)
+  alembic/             # migrations (0001 initial, 0002 auth, 0003 categories,
+                       # 0004 alert source, 0005 chatbot/pgvector)
 docs/
-  DESIGN.md           # v1.0 architecture, schema, anomaly rule, concurrency detail
-  ROADMAP.md          # v1.0 task breakdown
-  V2_DESIGN.md        # auth, categories, Redis, LLM signal, email, chatbot — architecture
-  V2_ROADMAP.md       # V2 task breakdown, phase by phase
+  DESIGN.md            # v1.0 architecture, schema, anomaly rule, concurrency detail
+  ROADMAP.md           # v1.0 task breakdown
+  V2_DESIGN.md         # auth, categories, Redis, LLM signal, chatbot — architecture
+  V2_ROADMAP.md        # V2 task breakdown, phase by phase, what's verified
 frontend/
   src/
-    auth/             # AuthContext, AuthPage (login/register)
-    components/       # ExpenseForm, ExpenseTable, SpendingChart, AlertsPanel, CategoryManager
-    hooks/            # useWebSocketAlerts
+    auth/              # AuthContext, AuthPage (login/register)
+    components/        # ExpenseForm, ExpenseTable, SpendingChart, AlertsPanel,
+                       # CategoryManager, ChatPanel
+    hooks/              # useWebSocketAlerts
     Dashboard.tsx, api.ts
 docker-compose.yml
 ```

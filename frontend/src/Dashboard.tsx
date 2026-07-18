@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Alert, api, Category, Expense, ExpenseInput } from "./api";
 import { AlertsPanel } from "./components/AlertsPanel";
 import { CategoryManager } from "./components/CategoryManager";
+import { ChatPanel } from "./components/ChatPanel";
 import { ExpenseForm } from "./components/ExpenseForm";
 import { ExpenseTable } from "./components/ExpenseTable";
 import { SpendingChart } from "./components/SpendingChart";
@@ -113,6 +114,8 @@ export function Dashboard() {
           </button>
         </div>
       </header>
+
+      <ChatPanel />
 
       <div className="layout">
         <div className="column">

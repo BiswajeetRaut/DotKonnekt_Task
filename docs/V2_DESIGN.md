@@ -1,13 +1,15 @@
 # V2 Design Doc — Multi-user, Notifications, LLM Signal, Chatbot
 
-This is a planning doc only — no code yet. It extends the shipped v1.0
-(single-workspace expense tracker) with six features the user wants explored:
-auth/multi-tenancy, custom categories, a Redis-based event bus, an LLM-based
-second anomaly signal, email notifications, and a RAG chatbot over
-expenses/alerts.
+Originally a planning doc; five of the six phases below (A-D, F) are now
+built and verified live — see [V2_ROADMAP.md](V2_ROADMAP.md) for the
+phase-by-phase status and what was actually confirmed working. Only Phase E
+(email notifications) remains, blocked on choosing a provider. The design
+decisions below reflect what shipped, with notes where reality diverged from
+the original plan (mainly: Phase F needed a backfill step the original plan
+didn't call out, and the pgvector install hit real local-toolchain friction).
 
 Scope note: this is meaningfully bigger than the original 2-hour assessment.
-It's organized as six phases with explicit dependencies, so work can proceed
+It's organized as six phases with explicit dependencies, so work proceeded
 phase by phase rather than all at once. See [V2_ROADMAP.md](V2_ROADMAP.md)
 for the task checklist derived from this doc.
 
@@ -188,17 +190,38 @@ Only `critical` severity triggers an email by default, to avoid spam; a
 `notification_preferences` table (per user: email on/off, instant vs. daily
 digest) is a natural small addition here rather than hardcoding the policy.
 
-## Phase F — Chatbot over expenses & alerts (pgvector RAG)
+## Phase F — Chatbot over expenses & alerts (pgvector RAG) — BUILT, verified
 
 **Goal:** let a user ask conversational questions ("why was I flagged last
 week?", "how much did I spend on food in June?") against their own data.
 
-**This is the largest, highest-uncertainty phase.**
+**This was the largest, highest-uncertainty phase — and the estimate held.**
+Full verification detail in [V2_ROADMAP.md](V2_ROADMAP.md) Phase F.
 
-**Infra dependency to verify first:** Postgres needs the `pgvector`
-extension available (`CREATE EXTENSION vector;`). Not yet confirmed whether
-the local PostgreSQL 18 install has it — needs checking before this phase
-starts, since it may require a separate extension install.
+**Infra dependency, resolved (with real friction):** `pgvector` was not
+available on the local Postgres 18 (EDB installer) instance and had to be
+built from source. Two blockers came up, not just one: `-march=native` isn't
+valid for a universal (x86_64+arm64) build (fixed with pgvector's own
+`OPTFLAGS=""` override), and the EDB Postgres build itself was compiled
+expecting an Xcode SDK (`MacOSX14.sdk`) that isn't installed on this
+unsupported macOS 12 machine at all (fixed with a symlink to the closest
+available SDK). Both the `make install` step and the SDK symlink needed
+`sudo` — done by the user directly in their own terminal, since there's no
+way to pass a password through an automated tool call. Docker Compose's `db`
+image was switched to `pgvector/pgvector:pg16` (bundles the extension) for
+whoever runs the containerized setup instead.
+
+**Gap found during verification, not anticipated in the original plan:** the
+indexer only embeds *new* expenses/alerts going forward (event-driven, by
+design). The first real chatbot question asked about a pre-existing flagged
+expense and got a confidently wrong answer — the vector store had exactly
+one chunk (from a brand-new test expense), and the model reasoned from
+whatever was closest, since nothing relevant actually existed yet. Fixed
+with a one-time backfill script (`app/chat/backfill.py`) that indexes all
+existing expenses/alerts; re-running the same question afterward returned
+the correct, grounded answer. Documented rather than silently patched over,
+since it's a real instance of "a RAG system is only as good as what's
+actually indexed."
 
 **Why naive RAG isn't enough here:** "how much did I spend in June" is an
 *aggregation* question, not a similarity-search question — pure vector
@@ -235,10 +258,12 @@ chat panel in the frontend.
 
 ## Open questions before implementation can start
 
-1. ~~LLM/embedding provider~~ — resolved: OpenAI for both. API key to be
-   added to `.env` when Phase D / Phase F actually start (not needed for
-   planning).
-2. Email provider/credentials — needed for Phase E.
-3. Confirm `pgvector` extension availability on the local Postgres 18 install
-   — needed for Phase F.
-4. JWT-in-cookie vs. `localStorage` — recommended cookie, but confirm.
+1. ~~LLM/embedding provider~~ — resolved: OpenAI for both. Key added to
+   `backend/.env` (gitignored).
+2. Email provider/credentials — still needed, only remaining blocker, for
+   Phase E.
+3. ~~Confirm `pgvector` extension availability~~ — resolved: not available
+   out of the box, built from source (see Phase F notes above). Now
+   installed and verified working on the local Postgres 18 instance.
+4. ~~JWT-in-cookie vs. `localStorage`~~ — resolved: httpOnly cookie,
+   built and verified in Phase A.

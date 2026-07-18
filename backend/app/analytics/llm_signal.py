@@ -39,6 +39,7 @@ from sqlalchemy.orm import Session
 from app.analytics.anomaly_service import MIN_SAMPLES, WARNING_Z, _fetch_history
 from app.config import settings
 from app.database import SessionLocal
+from app.events import publish_alert_created
 from app.models import Alert, Category, Expense
 from app.ws_manager import manager as ws_manager
 
@@ -154,6 +155,7 @@ async def handle_expense_created_llm(expense_id: int) -> None:
         db.close()
 
     logger.info("LLM anomaly flagged: expense_id=%s", expense_id)
+    await publish_alert_created(alert.id)
     await ws_manager.broadcast(
         user_id,
         {

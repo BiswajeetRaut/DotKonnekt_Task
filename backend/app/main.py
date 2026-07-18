@@ -6,11 +6,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.analytics.anomaly_service import handle_expense_created
 from app.analytics.llm_signal import handle_expense_created_llm
 from app.auth import COOKIE_NAME, decode_access_token
+from app.chat.indexer import handle_alert_created_index, handle_expense_created_index
 from app.config import settings
 from app.database import SessionLocal
-from app.events import start_listener, stop_listener, subscribe
+from app.events import ALERT_CREATED, EXPENSE_CREATED, start_listener, stop_listener, subscribe
 from app.models import User
-from app.routers import alerts, auth, categories, expenses
+from app.routers import alerts, auth, categories, chat, expenses
 from app.ws_manager import manager as ws_manager
 
 logging.basicConfig(level=logging.INFO)
@@ -29,18 +30,23 @@ app.include_router(auth.router)
 app.include_router(categories.router)
 app.include_router(expenses.router)
 app.include_router(alerts.router)
+app.include_router(chat.router)
 
 
 @app.on_event("startup")
 async def on_startup() -> None:
-    # This is the only place the CRUD layer and the analytics services meet:
-    # subscriptions, not imports in a route handler. Two independent
-    # subscribers on the same event — the rule-based detector and the LLM
-    # secondary signal — each writes its own Alert if it fires.
-    subscribe(handle_expense_created)
-    subscribe(handle_expense_created_llm)
-    # Redis Pub/Sub listener loops — one for expense.created -> analytics,
-    # one for alert broadcast -> this instance's locally-connected sockets.
+    # This is the only place the CRUD layer and the analytics/chat services
+    # meet: subscriptions, not imports in a route handler. Three independent
+    # subscribers on expense_created (rule-based detector, LLM secondary
+    # signal, chatbot indexer); the chatbot indexer also subscribes to
+    # alert_created so alerts become searchable too.
+    subscribe(EXPENSE_CREATED, handle_expense_created)
+    subscribe(EXPENSE_CREATED, handle_expense_created_llm)
+    subscribe(EXPENSE_CREATED, handle_expense_created_index)
+    subscribe(ALERT_CREATED, handle_alert_created_index)
+    # Redis Pub/Sub listener loops — one for expense/alert events -> the
+    # subscribers above, one for alert broadcast -> this instance's
+    # locally-connected sockets.
     start_listener()
     ws_manager.start_listener()
 

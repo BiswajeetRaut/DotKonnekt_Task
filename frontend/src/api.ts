@@ -42,6 +42,11 @@ export interface AuthUser {
   created_at: string;
 }
 
+export interface ChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
 class ConflictError extends Error {
   constructor() {
     super("This expense was changed by someone else. Refresh and try again.");
@@ -102,6 +107,10 @@ export const api = {
   deleteExpense: (id: number) => request<void>(`/expenses/${id}`, { method: "DELETE" }),
   listAlerts: () => request<Alert[]>("/alerts"),
   acknowledgeAlert: (id: number) => request<Alert>(`/alerts/${id}/ack`, { method: "PATCH" }),
+
+  getChatHistory: () => request<ChatMessage[]>("/chat/history"),
+  sendChatMessage: (message: string) =>
+    request<{ reply: string }>("/chat", { method: "POST", body: JSON.stringify({ message }) }),
 };
 
 export { AuthError, ConflictError };

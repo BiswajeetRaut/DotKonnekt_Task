@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 
+from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     DateTime,
@@ -7,11 +8,14 @@ from sqlalchemy import (
     Integer,
     Numeric,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+
+EMBEDDING_DIM = 1536  # OpenAI text-embedding-3-small
 
 
 def utcnow() -> datetime:
@@ -80,3 +84,33 @@ class Alert(Base):
     acknowledged: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     expense: Mapped["Expense"] = relationship("Expense", back_populates="alerts")
+
+
+class KnowledgeChunk(Base):
+    """Embedded, chatbot-retrievable text — deliberately separate from the
+    core CRUD tables (expenses/alerts) rather than bolting an embedding
+    column onto them. Populated by an indexer subscribed to expense/alert
+    creation events, same "subscribe, don't couple" pattern as the analytics
+    services.
+    """
+
+    __tablename__ = "knowledge_chunks"
+    __table_args__ = (UniqueConstraint("source_type", "source_id", name="uq_knowledge_chunks_source"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)  # 'expense' | 'alert'
+    source_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    embedding: Mapped[list[float]] = mapped_column(Vector(EMBEDDING_DIM), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)
+
+
+class ChatMessage(Base):
+    __tablename__ = "chat_messages"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True)
+    role: Mapped[str] = mapped_column(String(16), nullable=False)  # 'user' | 'assistant'
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow, nullable=False)

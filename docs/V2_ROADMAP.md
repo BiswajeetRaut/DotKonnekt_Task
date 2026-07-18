@@ -79,9 +79,6 @@ resolved. Status legend: `[ ]` todo, `[~]` in progress, `[x]` done.
       `alerts_broadcast` channel to a connected WebSocket client — full
       round trip through actual Redis, not mocked
 
-## Phase D — LLM secondary anomaly signal (independent, better after A)
-- [ ] `alerts.source` column (`'rule'` | `'llm'`) + migration
-
 ## Phase D — LLM secondary anomaly signal — DONE, verified end-to-end
 - [x] `alerts.source` column (`'rule'` | `'llm'`) + migration (`0004_alert_source.py`)
 - [x] `analytics/llm_signal.py` — second independent subscriber on
@@ -114,19 +111,45 @@ resolved. Status legend: `[ ]` todo, `[~]` in progress, `[x]` done.
 - [ ] `notification_preferences` table (email on/off, instant vs. digest)
 - [ ] Frontend: notification preferences UI
 
-## Phase F — Chatbot / RAG over expenses & alerts (depends on Phase A)
-- [ ] Confirm/install `pgvector` extension
-- [ ] `knowledge_chunks` table (dedicated, not bolted onto core tables)
-- [ ] Indexer subscriber: embeds new expense/alert text via OpenAI
-      `text-embedding-3-small` on create event
-- [ ] `search_similar(query)` tool — vector similarity search
-- [ ] `run_aggregate_query(filters)` tool — constrained/parameterized, not
-      free-form SQL generation (injection + correctness risk)
-- [ ] Chat LLM (OpenAI, function/tool calling) wired with both tools
-      (agentic RAG, not naive single-retrieval RAG)
-- [ ] `chat_messages` table for conversation history
-- [ ] `POST /chat` endpoint (streaming — SSE or reuse WebSocket infra)
-- [ ] Frontend: chat panel
+## Phase F — Chatbot / RAG over expenses & alerts — DONE, verified end-to-end
+- [x] `pgvector` extension installed on local Postgres 18 — required building
+      from source (`brew`-installed Redis was easy; this EDB install needed a
+      manual `make`/`make install` since no prebuilt bottle exists for this
+      unsupported macOS 12 config, plus a symlink workaround for a missing
+      Xcode SDK the Postgres build expected). `CREATE EXTENSION vector;`
+      confirmed on `expense_tracker`.
+- [x] `knowledge_chunks` table (dedicated, not bolted onto core tables) +
+      `chat_messages` table for conversation history (`0005_chatbot.py`)
+- [x] Indexer subscriber (`app/chat/indexer.py`): embeds new expense/alert
+      text via OpenAI `text-embedding-3-small` on `expense_created`/
+      `alert_created` events; `events.py` generalized to multi-channel to
+      support the second event type
+- [x] One-time backfill script (`app/chat/backfill.py`) for expenses/alerts
+      that existed before this feature — necessary in practice: without it,
+      the chatbot answered a "why was I flagged" question by hallucinating
+      a connection to the only chunk that existed, because historical data
+      wasn't retroactively indexed. Fixed by backfilling all 95 expenses +
+      10 alerts; re-verified the same question afterward and got the
+      correct, grounded answer.
+- [x] `search_similar(query)` tool — vector similarity search (pgvector
+      cosine distance via an HNSW index)
+- [x] `run_aggregate_query(filters)` tool — constrained/parameterized
+      (aggregation type + optional category/date range as typed arguments),
+      not free-form SQL generation
+- [x] Chat LLM (`gpt-4o-mini`, OpenAI function/tool calling) wired with both
+      tools — agentic RAG: the model picks which tool(s) it needs per
+      question rather than one fixed retrieval step
+- [x] `POST /chat` endpoint (non-streaming JSON response — see Known
+      Limitations) + `GET /chat/history`
+- [x] Frontend: `ChatPanel` component, message bubbles, persists across reload
+- [x] Verified live against the real OpenAI API + real pgvector:
+  - "How much have I spent on food in total?" → $1,062.08, matched exactly
+    against a raw SQL `SUM()` query
+  - "How much did I spend on transport?" → $1,547.53, also matched exactly
+  - "Do I have any design or Figma related expenses?" → correctly found and
+    described the one matching expense via semantic search
+  - "Why was my concert tickets expense flagged?" → correctly retrieved and
+    explained the actual LLM-detected alert reason (after the backfill fix)
 
 ## Explicit non-goals for V2 (unless you ask otherwise)
 - Refresh-token rotation (single reasonably-short-lived access token instead)
