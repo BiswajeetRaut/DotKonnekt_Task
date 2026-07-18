@@ -7,8 +7,10 @@ resolved. Status legend: `[ ]` todo, `[~]` in progress, `[x]` done.
 ## Open questions to resolve before starting (see V2_DESIGN.md §"Open questions")
 - [x] LLM + embedding provider — OpenAI for both (user has API key, adds to
       `.env` when Phase D/F start)
-- [ ] Email provider/credentials chosen for Phase E
-- [ ] `pgvector` extension confirmed available on local Postgres 18
+- [ ] Email provider/credentials chosen for Phase E (still open — see below,
+      browser notifications were built instead/first)
+- [x] `pgvector` extension confirmed available — resolved in Phase F (built
+      from source; see Phase F notes)
 - [x] JWT storage: httpOnly cookie (`SameSite=Lax`) — built and confirmed
       working; localhost:5173/8000 are same-site so the cookie round-trips
       automatically on `fetch` (with `credentials: "include"`) and on the
@@ -104,12 +106,37 @@ resolved. Status legend: `[ ]` todo, `[~]` in progress, `[x]` done.
   - A rule-triggering expense (z=5.30) did not also fire the LLM check —
     the cost gate correctly skipped it since the rule already handled it
 
-## Phase E — Email notifications (depends on Phase A for user.email)
-- [ ] Choose provider, store credentials in `.env` (never commit)
-- [ ] `notifications/email_service.py` — subscriber on alert-created,
-      critical severity only by default
-- [ ] `notification_preferences` table (email on/off, instant vs. digest)
-- [ ] Frontend: notification preferences UI
+## Phase E — Notifications
+
+**Pivoted mid-phase:** discussed email providers (Resend recommended, free
+tier), but the user asked about alternatives and chose **browser
+notifications** instead — free, no provider/signup, no credentials to
+manage, and it reuses infrastructure that already exists (the WebSocket
+push) rather than adding a new one.
+
+- [x] Browser `Notification` API — `frontend/src/notifications.ts`
+      (permission check/request, `notifyAlert()`) + `NotificationToggle.tsx`
+      in the header (shows enable button / on / blocked, based on
+      `Notification.permission`)
+- [x] Wired into `useWebSocketAlerts`'s callback in `Dashboard.tsx` — fires
+      on every pushed alert, no backend changes needed
+- [x] Gated on `document.visibilityState !== 'visible'` — only notifies when
+      the tab isn't focused, matching Slack/Gmail convention (avoids
+      double-signaling when the user is already looking at the in-app
+      AlertsPanel)
+- [x] Verified live with Playwright: granted a mocked `Notification`
+      permission, backgrounded the tab (`visibilityState: 'hidden'`),
+      confirmed the notification fired with the correct title/body/tag when
+      a new critical alert was pushed; separately confirmed with the tab
+      genuinely visible that **no** notification fires — the gate works in
+      both directions, not just tested for the positive case
+- [ ] **Email is still not built** — this is a genuinely different channel
+      (reaches you with the browser fully closed; browser notifications
+      don't). Left for later: choose a provider (Resend recommended — free
+      tier, simplest API) and provide credentials.
+- [ ] `notification_preferences` table (per-channel on/off) — not built;
+      only one channel (browser) exists right now, so there's nothing to
+      choose between yet
 
 ## Phase F — Chatbot / RAG over expenses & alerts — DONE, verified end-to-end
 - [x] `pgvector` extension installed on local Postgres 18 — required building

@@ -5,9 +5,11 @@ import { CategoryManager } from "./components/CategoryManager";
 import { ChatPanel } from "./components/ChatPanel";
 import { ExpenseForm } from "./components/ExpenseForm";
 import { ExpenseTable } from "./components/ExpenseTable";
+import { NotificationToggle } from "./components/NotificationToggle";
 import { SpendingChart } from "./components/SpendingChart";
 import { useAuth } from "./auth/AuthContext";
 import { useWebSocketAlerts } from "./hooks/useWebSocketAlerts";
+import { notifyAlert } from "./notifications";
 
 type LoadState = "loading" | "ready" | "error";
 
@@ -63,6 +65,7 @@ export function Dashboard() {
   useWebSocketAlerts(
     (alert) => {
       setAlerts((prev) => [alert, ...prev.filter((a) => a.id !== alert.id)]);
+      notifyAlert(alert);
     },
     setWsConnected
   );
@@ -108,6 +111,7 @@ export function Dashboard() {
           <p className="subtitle">React dashboard · FastAPI · PostgreSQL · anomaly alerts</p>
         </div>
         <div className="header-account">
+          <NotificationToggle />
           <span>{user?.email}</span>
           <button type="button" onClick={logout}>
             Sign out

@@ -97,7 +97,16 @@ real data in a browser (screenshots taken with Playwright during the build).
   [docs/V2_DESIGN.md](docs/V2_DESIGN.md) Phase F, including the pgvector
   local-build friction (missing SDK, `-march=native` issue) worked through
   to get it running.
-- Still planned, not yet built: email notifications — see
+- **Browser notifications**: native `Notification` API, no provider/signup
+  needed — reuses the existing WebSocket push rather than adding new
+  infrastructure. Only fires when the tab isn't focused (matches Slack/Gmail
+  convention — avoids double-signaling when the in-app alert panel is
+  already visible). Verified with Playwright in both directions: fires with
+  the correct title/body when backgrounded, stays silent when the tab is
+  actually visible.
+- Still planned, not yet built: email notifications (discussed providers —
+  Resend recommended, free tier — but browser notifications were built
+  first/instead since they need no signup) — see
   [docs/V2_ROADMAP.md](docs/V2_ROADMAP.md) for the phase-by-phase plan.
 
 ## Architecture at a glance
@@ -370,6 +379,14 @@ without it get `401`.
   verification flow either. Fine for this scope; a real product needs both.
 - **Auth is per-account, not per-team.** Each user sees only their own data;
   there's no sharing/org concept.
+- **Browser notifications need a tab open somewhere.** They ride on the
+  existing WebSocket connection, so they work in the background/unfocused
+  but not with the browser fully closed — that would need a service worker
+  + Push API + a backend push library (or, more simply, the email channel
+  below), which is a meaningfully bigger lift and wasn't built.
+- **Email notifications aren't built.** A provider was picked in discussion
+  (Resend, free tier) but never wired up — browser notifications covered the
+  "free, no setup" ask first. This is the one remaining V2 phase.
 - **Rolling-window contamination.** The z-score's trailing window can include
   a previous outlier (e.g. a prior spike still within the last 20 records),
   which inflates the mean/stddev and can suppress detection of a second,
@@ -461,8 +478,9 @@ frontend/
   src/
     auth/              # AuthContext, AuthPage (login/register)
     components/        # ExpenseForm, ExpenseTable, SpendingChart, AlertsPanel,
-                       # CategoryManager, ChatPanel
+                       # CategoryManager, ChatPanel, NotificationToggle
     hooks/              # useWebSocketAlerts
+    notifications.ts    # browser Notification API helpers
     Dashboard.tsx, api.ts
 docker-compose.yml
 ```
