@@ -48,8 +48,8 @@ export interface ChatMessage {
 }
 
 class ConflictError extends Error {
-  constructor() {
-    super("This expense was changed by someone else. Refresh and try again.");
+  constructor(message = "This expense was changed by someone else. Refresh and try again.") {
+    super(message);
     this.name = "ConflictError";
   }
 }
@@ -71,7 +71,12 @@ async function request<T>(path: string, options?: RequestInit): Promise<T> {
     ...options,
   });
   if (res.status === 409) {
-    throw new ConflictError();
+    // 409 means different things on different endpoints (expense version
+    // conflict vs. category still in use) — use the backend's actual
+    // message rather than a hardcoded one, falling back to the generic
+    // expense-conflict wording only if the response has no detail.
+    const body = await res.json().catch(() => ({}));
+    throw new ConflictError(body.detail);
   }
   if (res.status === 401) {
     throw new AuthError();
