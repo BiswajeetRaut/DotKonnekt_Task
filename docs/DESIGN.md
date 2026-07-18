@@ -6,9 +6,6 @@ Project A from the assessment: expense logging + spending dashboard + a separate
 rule-based anomaly detection service, with real-time alert delivery over WebSockets
 and optimistic locking for concurrent writes.
 
-Time-boxed to a 2-hour build. Cuts are listed in "Out of scope" below and repeated
-in the README's Known Limitations section — nothing is silently dropped.
-
 ## 2. Architecture
 
 ```
