@@ -234,35 +234,35 @@ sequenceDiagram
     actor User
     participant React
     participant API as /chat router
-    participant Loop as chat/service.py
+    participant ChatSvc as chat/service.py
     participant OpenAI
     participant Tools as chat/tools.py
     participant DB as PostgreSQL + pgvector
 
     User->>React: Type a question
     React->>API: POST /chat {message}
-    API->>Loop: answer(db, user_id, message)
-    Loop->>DB: load last 10 chat_messages for context
-    Loop->>OpenAI: chat.completions(messages, tools=[search_similar, run_aggregate_query])
+    API->>ChatSvc: answer(db, user_id, message)
+    ChatSvc->>DB: load last 10 chat_messages for context
+    ChatSvc->>OpenAI: chat.completions(messages, tools=[search_similar, run_aggregate_query])
 
     alt model requests search_similar
-        OpenAI-->>Loop: tool_call: search_similar(query)
-        Loop->>Tools: search_similar(db, user_id, query)
+        OpenAI-->>ChatSvc: tool_call: search_similar(query)
+        ChatSvc->>Tools: search_similar(db, user_id, query)
         Tools->>OpenAI: embed(query) [text-embedding-3-small]
         Tools->>DB: ORDER BY embedding <=> :vector LIMIT k<br/>(HNSW cosine index, scoped to user_id)
         DB-->>Tools: matching chunk text
     else model requests run_aggregate_query
-        OpenAI-->>Loop: tool_call: run_aggregate_query(args)
-        Loop->>Tools: run_aggregate_query(db, user_id, args)
+        OpenAI-->>ChatSvc: tool_call: run_aggregate_query(args)
+        ChatSvc->>Tools: run_aggregate_query(db, user_id, args)
         Tools->>DB: SUM/COUNT/AVG, typed filters only<br/>(never free-form SQL)
         DB-->>Tools: numeric result
     end
 
-    Tools-->>Loop: tool result (JSON)
-    Loop->>OpenAI: chat.completions(messages + tool result)
-    OpenAI-->>Loop: final natural-language answer
-    Loop->>DB: persist user message + assistant reply
-    Loop-->>API: reply
+    Tools-->>ChatSvc: tool result (JSON)
+    ChatSvc->>OpenAI: chat.completions(messages + tool result)
+    OpenAI-->>ChatSvc: final natural-language answer
+    ChatSvc->>DB: persist user message + assistant reply
+    ChatSvc-->>API: reply
     API-->>React: {reply}
     React-->>User: shown in ChatPanel
 ```
